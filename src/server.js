@@ -8,6 +8,7 @@ connectDB();
 
 const allowedOrigins = [
   process.env.FRONTEND_URL,
+  "https://tietheknot-mern-front-end.vercel.app",
   "http://localhost:5173",
   "http://localhost:3000",
 ];

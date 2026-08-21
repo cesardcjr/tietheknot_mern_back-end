@@ -13,16 +13,19 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true,
     minlength: 6,
+    maxlength: 128,
   },
   fullName: {
     type: String,
     required: true,
     trim: true,
+    maxlength: 120,
   },
   contactNumber: {
     type: String,
     required: true,
     trim: true,
+    maxlength: 40,
   },
   isAdmin: {
     type: Boolean,

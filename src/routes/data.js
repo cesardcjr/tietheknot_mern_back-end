@@ -10,10 +10,107 @@ async function getOrCreate(userId) {
   return data;
 }
 
+const GUEST_FIELDS = [
+  "name",
+  "pax",
+  "category",
+  "confirmed",
+  "remarks",
+  "listedBy",
+];
+const EXPENSE_FIELDS = ["supplierName", "expenseType", "cost", "downpayment", "contactPerson", "contactNum", "paymentStatus", "paymentTracker"];
+const TASK_FIELDS = ["title", "details", "dueDate", "status"];
+const CHECKLIST_FIELDS = ["title", "details", "checked"];
+const PROGRAM_FIELDS = ["title", "startTime", "endTime", "details", "_start", "_end"];
+const SUPPLIER_FIELDS = ["supplierName", "categoryType", "quotedPrice", "contactPerson", "contactNum", "location", "links", "quoteDetails"];
+const EVENT_FIELDS = ["title", "targetDate"];
+
+function pick(source, fields) {
+  return Object.fromEntries(
+    fields
+      .filter((field) => source[field] !== undefined)
+      .map((field) => [field, source[field]]),
+  );
+}
+
+function resolveGuest(data, reference) {
+  const value = String(reference);
+  return data.guests.find(
+    (guest) => String(guest._id) === value || guest.name === reference,
+  );
+}
+
+function normalizeSeating(data) {
+  const before = JSON.stringify({
+    seating: data.seating,
+    presidentialSeating: data.presidentialSeating,
+    guests: data.guests.map((guest) => [guest._id, guest.status, guest.tableNumber]),
+  });
+  const assigned = new Set();
+
+  data.guests.forEach((guest) => {
+    guest.status = "Not Seated";
+    guest.tableNumber = null;
+  });
+
+  for (const [field, prefix] of [
+    ["seating", ""],
+    ["presidentialSeating", "P"],
+  ]) {
+    const normalized = {};
+    for (const [tableNumber, references] of Object.entries(data[field] || {})) {
+      normalized[tableNumber] = [];
+      for (const reference of Array.isArray(references) ? references : []) {
+        const guest = resolveGuest(data, reference);
+        if (!guest || assigned.has(String(guest._id))) continue;
+        assigned.add(String(guest._id));
+        normalized[tableNumber].push(String(guest._id));
+        guest.status = "Seated";
+        guest.tableNumber = prefix ? `${prefix}${tableNumber}` : Number(tableNumber);
+      }
+    }
+    data[field] = normalized;
+    data.markModified(field);
+  }
+
+  const after = JSON.stringify({
+    seating: data.seating,
+    presidentialSeating: data.presidentialSeating,
+    guests: data.guests.map((guest) => [guest._id, guest.status, guest.tableNumber]),
+  });
+  return before !== after;
+}
+
+function removeGuestFromSeating(data, guest) {
+  for (const field of ["seating", "presidentialSeating"]) {
+    data[field] = Object.fromEntries(
+      Object.entries(data[field] || {}).map(([tableNumber, references]) => [
+        tableNumber,
+        (references || []).filter(
+          (reference) =>
+            String(reference) !== String(guest._id) && reference !== guest.name,
+        ),
+      ]),
+    );
+    data.markModified(field);
+  }
+}
+
+function seatingResponse(data) {
+  return {
+    seating: data.seating,
+    presidentialSeating: data.presidentialSeating,
+    seatingSettings: data.seatingSettings,
+    presidentialSettings: data.presidentialSettings,
+    guests: data.guests,
+  };
+}
+
 // GET /api/data — fetch all event data for current user
 router.get("/", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
+    if (normalizeSeating(data)) await data.save();
     res.json(data);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -35,8 +132,9 @@ router.put("/guest-settings", protect, async (req, res) => {
 // ── NOMINATED GUESTS ──────────────────────────────────────
 router.put("/nominated-guests", protect, async (req, res) => {
   try {
+    if (!Array.isArray(req.body)) return res.status(400).json({ message: "Expected an array of names" });
     const data = await getOrCreate(req.user._id);
-    data.nominatedGuests = req.body;
+    data.nominatedGuests = [...new Set(req.body.map((name) => String(name).trim()).filter(Boolean))];
     await data.save();
     res.json(data.nominatedGuests);
   } catch (err) {
@@ -57,7 +155,17 @@ router.get("/guests", protect, async (req, res) => {
 router.post("/guests", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
-    const guest = { ...req.body, _localId: Date.now() };
+    const name = String(req.body.name || "").trim();
+    if (!name) return res.status(400).json({ message: "Guest name is required" });
+    if (data.guests.some((guest) => guest.name.toLowerCase() === name.toLowerCase())) {
+      return res.status(409).json({ message: "Guest name already exists" });
+    }
+    const guest = {
+      ...pick({ ...req.body, name }, GUEST_FIELDS),
+      status: "Not Seated",
+      tableNumber: null,
+      _localId: Date.now(),
+    };
     data.guests.push(guest);
     await data.save();
     res.status(201).json(data.guests[data.guests.length - 1]);
@@ -71,7 +179,13 @@ router.put("/guests/:id", protect, async (req, res) => {
     const data = await getOrCreate(req.user._id);
     const guest = data.guests.id(req.params.id);
     if (!guest) return res.status(404).json({ message: "Guest not found" });
-    Object.assign(guest, req.body);
+    const name = req.body.name === undefined ? guest.name : String(req.body.name).trim();
+    if (!name) return res.status(400).json({ message: "Guest name is required" });
+    if (data.guests.some((item) => String(item._id) !== String(guest._id) && item.name.toLowerCase() === name.toLowerCase())) {
+      return res.status(409).json({ message: "Guest name already exists" });
+    }
+    normalizeSeating(data);
+    Object.assign(guest, pick({ ...req.body, name }, GUEST_FIELDS));
     await data.save();
     res.json(guest);
   } catch (err) {
@@ -82,21 +196,12 @@ router.put("/guests/:id", protect, async (req, res) => {
 router.delete("/guests/:id", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
+    const guest = data.guests.id(req.params.id);
+    if (!guest) return res.status(404).json({ message: "Guest not found" });
+    removeGuestFromSeating(data, guest);
     data.guests = data.guests.filter((g) => g._id.toString() !== req.params.id);
     await data.save();
-    res.json({ message: "Guest removed" });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// Bulk set guests (for sort A-Z)
-router.put("/guests", protect, async (req, res) => {
-  try {
-    const data = await getOrCreate(req.user._id);
-    data.guests = req.body;
-    await data.save();
-    res.json(data.guests);
+    res.json({ message: "Guest removed", ...seatingResponse(data) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -137,15 +242,105 @@ router.put("/seating-settings", protect, async (req, res) => {
   }
 });
 
-router.put("/seating", protect, async (req, res) => {
+router.post("/seating/assign", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
-    data.seating = req.body;
-    data.markModified("seating");
+    normalizeSeating(data);
+    const type = req.body.type === "presidential" ? "presidential" : "regular";
+    const tableNumber = Number(req.body.tableNumber);
+    const guest = data.guests.id(req.body.guestId);
+    const settings = type === "regular" ? data.seatingSettings : data.presidentialSettings;
+    const field = type === "regular" ? "seating" : "presidentialSeating";
+
+    if (!guest) return res.status(404).json({ message: "Guest not found" });
+    if (!Number.isInteger(tableNumber) || tableNumber < 1 || tableNumber > settings.tableCount) {
+      return res.status(400).json({ message: "Invalid table number" });
+    }
+
+    removeGuestFromSeating(data, guest);
+    const map = { ...(data[field] || {}) };
+    const references = [...(map[tableNumber] || [])];
+    const occupiedPax = references.reduce(
+      (total, reference) => total + Number(resolveGuest(data, reference)?.pax || 1),
+      0,
+    );
+    if (occupiedPax + Number(guest.pax || 1) > settings.maxPerTable) {
+      return res.status(409).json({ message: "Table capacity would be exceeded" });
+    }
+
+    references.push(String(guest._id));
+    map[tableNumber] = references;
+    data[field] = map;
+    data.markModified(field);
+    normalizeSeating(data);
     await data.save();
-    res.json(data.seating);
+    res.json(seatingResponse(data));
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
+  }
+});
+
+router.post("/seating/remove", protect, async (req, res) => {
+  try {
+    const data = await getOrCreate(req.user._id);
+    normalizeSeating(data);
+    const guest = data.guests.id(req.body.guestId);
+    if (!guest) return res.status(404).json({ message: "Guest not found" });
+    removeGuestFromSeating(data, guest);
+    normalizeSeating(data);
+    await data.save();
+    res.json(seatingResponse(data));
+  } catch (err) {
+    res.status(err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
+  }
+});
+
+router.delete("/seating/reset", protect, async (req, res) => {
+  try {
+    const data = await getOrCreate(req.user._id);
+    data.seatingSettings = { tableCount: 0, maxPerTable: 10, initialized: false };
+    data.presidentialSettings = { tableCount: 0, maxPerTable: 10 };
+    data.seating = {};
+    data.presidentialSeating = {};
+    data.markModified("seating");
+    data.markModified("presidentialSeating");
+    normalizeSeating(data);
+    await data.save();
+    res.json(seatingResponse(data));
+  } catch (err) {
+    res.status(err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
+  }
+});
+
+router.delete("/seating/tables/:type/:tableNumber", protect, async (req, res) => {
+  try {
+    const data = await getOrCreate(req.user._id);
+    normalizeSeating(data);
+    const type = req.params.type === "presidential" ? "presidential" : "regular";
+    const tableNumber = Number(req.params.tableNumber);
+    const field = type === "regular" ? "seating" : "presidentialSeating";
+    const settingsField = type === "regular" ? "seatingSettings" : "presidentialSettings";
+    const settings = data[settingsField];
+
+    if (!Number.isInteger(tableNumber) || tableNumber < 1 || tableNumber > settings.tableCount) {
+      return res.status(400).json({ message: "Invalid table number" });
+    }
+
+    const shifted = {};
+    let next = 1;
+    for (let current = 1; current <= settings.tableCount; current += 1) {
+      if (current === tableNumber) continue;
+      shifted[next] = data[field]?.[current] || [];
+      next += 1;
+    }
+    data[field] = shifted;
+    data[settingsField].tableCount = settings.tableCount - 1;
+    data.markModified(field);
+    normalizeSeating(data);
+    await data.save();
+    res.json(seatingResponse(data));
+  } catch (err) {
+    res.status(err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 });
 
@@ -155,18 +350,6 @@ router.put("/presidential-settings", protect, async (req, res) => {
     data.presidentialSettings = req.body;
     await data.save();
     res.json(data.presidentialSettings);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-router.put("/presidential-seating", protect, async (req, res) => {
-  try {
-    const data = await getOrCreate(req.user._id);
-    data.presidentialSeating = req.body;
-    data.markModified("presidentialSeating");
-    await data.save();
-    res.json(data.presidentialSeating);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -187,7 +370,10 @@ router.put("/expense-settings", protect, async (req, res) => {
 router.post("/expenses", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
-    const expense = { ...req.body, _localId: Date.now() };
+    const expense = { ...pick(req.body, EXPENSE_FIELDS), _localId: Date.now() };
+    if (Number(expense.downpayment || 0) > Number(expense.cost || 0)) {
+      return res.status(400).json({ message: "Downpayment cannot exceed total cost" });
+    }
     data.expenses.push(expense);
     await data.save();
     res.status(201).json(data.expenses[data.expenses.length - 1]);
@@ -201,7 +387,13 @@ router.put("/expenses/:id", protect, async (req, res) => {
     const data = await getOrCreate(req.user._id);
     const expense = data.expenses.id(req.params.id);
     if (!expense) return res.status(404).json({ message: "Expense not found" });
-    Object.assign(expense, req.body);
+    const updates = pick(req.body, EXPENSE_FIELDS);
+    const nextCost = updates.cost ?? expense.cost;
+    const nextDownpayment = updates.downpayment ?? expense.downpayment;
+    if (Number(nextDownpayment || 0) > Number(nextCost || 0)) {
+      return res.status(400).json({ message: "Downpayment cannot exceed total cost" });
+    }
+    Object.assign(expense, updates);
     await data.save();
     res.json(expense);
   } catch (err) {
@@ -237,7 +429,7 @@ router.delete("/expenses", protect, async (req, res) => {
 router.post("/tasks", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
-    const task = { ...req.body, _localId: Date.now() };
+    const task = { ...pick(req.body, TASK_FIELDS), _localId: Date.now() };
     data.tasks.push(task);
     await data.save();
     res.status(201).json(data.tasks[data.tasks.length - 1]);
@@ -251,7 +443,7 @@ router.put("/tasks/:id", protect, async (req, res) => {
     const data = await getOrCreate(req.user._id);
     const task = data.tasks.id(req.params.id);
     if (!task) return res.status(404).json({ message: "Task not found" });
-    Object.assign(task, req.body);
+    Object.assign(task, pick(req.body, TASK_FIELDS));
     await data.save();
     res.json(task);
   } catch (err) {
@@ -285,7 +477,7 @@ router.delete("/tasks", protect, async (req, res) => {
 router.post("/checklist", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
-    const item = { ...req.body, _localId: Date.now() };
+    const item = { ...pick(req.body, CHECKLIST_FIELDS), _localId: Date.now() };
     data.checklist.push(item);
     await data.save();
     res.status(201).json(data.checklist[data.checklist.length - 1]);
@@ -300,7 +492,7 @@ router.put("/checklist/:id", protect, async (req, res) => {
     const item = data.checklist.id(req.params.id);
     if (!item)
       return res.status(404).json({ message: "Checklist item not found" });
-    Object.assign(item, req.body);
+    Object.assign(item, pick(req.body, CHECKLIST_FIELDS));
     await data.save();
     res.json(item);
   } catch (err) {
@@ -336,7 +528,10 @@ router.delete("/checklist", protect, async (req, res) => {
 router.post("/program", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
-    const item = { ...req.body, _localId: Date.now() };
+    const item = { ...pick(req.body, PROGRAM_FIELDS), _localId: Date.now() };
+    if (!item._start || !item._end || item._end <= item._start) {
+      return res.status(400).json({ message: "Program end time must be later than start time" });
+    }
     data.program.push(item);
     await data.save();
     res.status(201).json(data.program[data.program.length - 1]);
@@ -351,7 +546,13 @@ router.put("/program/:id", protect, async (req, res) => {
     const item = data.program.id(req.params.id);
     if (!item)
       return res.status(404).json({ message: "Program item not found" });
-    Object.assign(item, req.body);
+    const updates = pick(req.body, PROGRAM_FIELDS);
+    const nextStart = updates._start ?? item._start;
+    const nextEnd = updates._end ?? item._end;
+    if (!nextStart || !nextEnd || nextEnd <= nextStart) {
+      return res.status(400).json({ message: "Program end time must be later than start time" });
+    }
+    Object.assign(item, updates);
     await data.save();
     res.json(item);
   } catch (err) {
@@ -387,7 +588,7 @@ router.delete("/program", protect, async (req, res) => {
 router.post("/suppliers", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
-    const supplier = { ...req.body, _localId: Date.now() };
+    const supplier = { ...pick(req.body, SUPPLIER_FIELDS), _localId: Date.now() };
     data.suppliers.push(supplier);
     await data.save();
     res.status(201).json(data.suppliers[data.suppliers.length - 1]);
@@ -402,7 +603,7 @@ router.put("/suppliers/:id", protect, async (req, res) => {
     const supplier = data.suppliers.id(req.params.id);
     if (!supplier)
       return res.status(404).json({ message: "Supplier not found" });
-    Object.assign(supplier, req.body);
+    Object.assign(supplier, pick(req.body, SUPPLIER_FIELDS));
     await data.save();
     res.json(supplier);
   } catch (err) {
@@ -438,7 +639,7 @@ router.delete("/suppliers", protect, async (req, res) => {
 router.post("/event", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
-    data.event = { ...req.body, _localId: Date.now() };
+    data.event = { ...pick(req.body, EVENT_FIELDS), _localId: Date.now() };
     await data.save();
     res.status(201).json(data.event);
   } catch (err) {
@@ -449,7 +650,7 @@ router.post("/event", protect, async (req, res) => {
 router.put("/event", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
-    data.event = { ...req.body, _localId: data.event?._localId || Date.now() };
+    data.event = { ...pick(req.body, EVENT_FIELDS), _localId: data.event?._localId || Date.now() };
     await data.save();
     res.json(data.event);
   } catch (err) {

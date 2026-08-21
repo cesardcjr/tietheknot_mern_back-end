@@ -10,8 +10,12 @@ const generateToken = (id) => {
 
 // POST /api/auth/register
 router.post("/register", async (req, res) => {
+  let user;
   try {
-    const { username, password, fullName, contactNumber } = req.body;
+    const username = String(req.body.username || "").trim().toLowerCase();
+    const password = String(req.body.password || "");
+    const fullName = String(req.body.fullName || "").trim();
+    const contactNumber = String(req.body.contactNumber || "").trim();
 
     if (!username || !password || !fullName || !contactNumber) {
       return res.status(400).json({ message: "All fields are required" });
@@ -23,13 +27,13 @@ router.post("/register", async (req, res) => {
         .json({ message: "Password must be at least 6 characters" });
     }
 
-    const userExists = await User.findOne({ username: username.toLowerCase() });
+    const userExists = await User.findOne({ username });
     if (userExists) {
-      return res.status(400).json({ message: "Username already taken" });
+      return res.status(409).json({ message: "Username already taken" });
     }
 
-    const user = await User.create({
-      username: username.toLowerCase(),
+    user = await User.create({
+      username,
       password,
       fullName,
       contactNumber,
@@ -40,13 +44,16 @@ router.post("/register", async (req, res) => {
     // Initialize empty event data for this user
     await EventData.create({ user: user._id });
 
-    const token = generateToken(user._id);
     res.status(201).json({
-      token,
       user: user.toSafeObject(),
+      requiresApproval: true,
     });
   } catch (error) {
     console.error(error);
+    if (user?._id) await User.deleteOne({ _id: user._id }).catch(() => {});
+    if (error?.code === 11000) {
+      return res.status(409).json({ message: "Username already taken" });
+    }
     res.status(500).json({ message: "Server error during registration" });
   }
 });
@@ -54,7 +61,8 @@ router.post("/register", async (req, res) => {
 // POST /api/auth/login
 router.post("/login", async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const username = String(req.body.username || "").trim().toLowerCase();
+    const password = String(req.body.password || "");
 
     if (!username || !password) {
       return res
@@ -62,7 +70,7 @@ router.post("/login", async (req, res) => {
         .json({ message: "Username and password are required" });
     }
 
-    const user = await User.findOne({ username: username.toLowerCase() });
+    const user = await User.findOne({ username });
     if (!user) {
       return res.status(401).json({ message: "Invalid username or password" });
     }

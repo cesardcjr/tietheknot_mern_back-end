@@ -13,6 +13,23 @@ const guestSchema = new mongoose.Schema(
     status: { type: String, enum: ["Not Seated", "Seated"], default: "Not Seated" },
     tableNumber: mongoose.Schema.Types.Mixed,
     confirmed: { type: Boolean, default: false },
+    rsvpStatus: {
+      type: String,
+      enum: ["Pending", "Accepted", "Declined"],
+      default: "Pending",
+    },
+    attendingPax: { type: Number, default: 0, min: 0, max: 50 },
+    email: { type: String, trim: true, lowercase: true, maxlength: 254 },
+    phone: { type: String, trim: true, maxlength: 40 },
+    dietaryNotes: { type: String, trim: true, maxlength: 1000 },
+    guestMessage: { type: String, trim: true, maxlength: 1500 },
+    declineReason: { type: String, trim: true, maxlength: 1000 },
+    invitationStatus: {
+      type: String,
+      enum: ["Not Created", "Draft", "Sent", "Opened", "Responded"],
+      default: "Not Created",
+    },
+    respondedAt: Date,
     remarks: { type: String, maxlength: 1000 },
     listedBy: { type: String, trim: true, maxlength: 120 },
   },
@@ -140,6 +157,9 @@ const eventDataSchema = new mongoose.Schema(
     program: [programSchema],
     suppliers: [supplierSchema],
     event: eventSchema,
+    invitationSettings: {
+      seatingReleased: { type: Boolean, default: false },
+    },
   },
   { timestamps: true },
 );

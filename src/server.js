@@ -14,11 +14,15 @@ for (const key of ["MONGO_URI", "JWT_SECRET"]) {
 }
 
 const allowedOrigins = [
-  process.env.FRONTEND_URL,
+  ...(process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
   "https://tietheknot-mern-front-end.vercel.app",
   "http://localhost:5173",
+  "http://localhost:5174",
   "http://localhost:3000",
-];
+].filter((origin, index, origins) => origins.indexOf(origin) === index);
 
 const corsOptions = {
     origin: function (origin, callback) {
@@ -60,6 +64,19 @@ app.use(
   require("./routes/auth"),
 );
 app.use("/api/data", require("./routes/data"));
+app.use("/api/invitations", require("./routes/invitations"));
+app.use("/api/media", require("./routes/media"));
+app.use(
+  "/api/public/invitations",
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 120,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    message: { message: "Too many invitation requests. Please try again later." },
+  }),
+  require("./routes/publicInvitations"),
+);
 
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
 

@@ -1,7 +1,15 @@
 const express = require("express");
 const router = express.Router();
 const EventData = require("../models/EventData");
+const Invitation = require("../models/Invitation");
 const { protect } = require("../middleware/authMiddleware");
+const {
+  guestPax,
+  normalizeSeating,
+  removeGuestFromSeating,
+  resolveGuest,
+  seatingResponse,
+} = require("../services/seatingService");
 
 // Helper: get or create event data for user
 async function getOrCreate(userId) {
@@ -15,6 +23,13 @@ const GUEST_FIELDS = [
   "pax",
   "category",
   "confirmed",
+  "rsvpStatus",
+  "attendingPax",
+  "email",
+  "phone",
+  "dietaryNotes",
+  "guestMessage",
+  "declineReason",
   "remarks",
   "listedBy",
 ];
@@ -33,77 +48,16 @@ function pick(source, fields) {
   );
 }
 
-function resolveGuest(data, reference) {
-  const value = String(reference);
-  return data.guests.find(
-    (guest) => String(guest._id) === value || guest.name === reference,
-  );
-}
-
-function normalizeSeating(data) {
-  const before = JSON.stringify({
-    seating: data.seating,
-    presidentialSeating: data.presidentialSeating,
-    guests: data.guests.map((guest) => [guest._id, guest.status, guest.tableNumber]),
-  });
-  const assigned = new Set();
-
-  data.guests.forEach((guest) => {
-    guest.status = "Not Seated";
-    guest.tableNumber = null;
-  });
-
-  for (const [field, prefix] of [
-    ["seating", ""],
-    ["presidentialSeating", "P"],
-  ]) {
-    const normalized = {};
-    for (const [tableNumber, references] of Object.entries(data[field] || {})) {
-      normalized[tableNumber] = [];
-      for (const reference of Array.isArray(references) ? references : []) {
-        const guest = resolveGuest(data, reference);
-        if (!guest || assigned.has(String(guest._id))) continue;
-        assigned.add(String(guest._id));
-        normalized[tableNumber].push(String(guest._id));
-        guest.status = "Seated";
-        guest.tableNumber = prefix ? `${prefix}${tableNumber}` : Number(tableNumber);
-      }
-    }
-    data[field] = normalized;
-    data.markModified(field);
+function validateGuestRsvp(guest) {
+  const pax = Number(guest.pax || 1);
+  const attendingPax = Number(guest.attendingPax || 0);
+  if (guest.rsvpStatus === "Accepted" && (attendingPax < 1 || attendingPax > pax)) {
+    return `Attending pax must be between 1 and ${pax}`;
   }
-
-  const after = JSON.stringify({
-    seating: data.seating,
-    presidentialSeating: data.presidentialSeating,
-    guests: data.guests.map((guest) => [guest._id, guest.status, guest.tableNumber]),
-  });
-  return before !== after;
-}
-
-function removeGuestFromSeating(data, guest) {
-  for (const field of ["seating", "presidentialSeating"]) {
-    data[field] = Object.fromEntries(
-      Object.entries(data[field] || {}).map(([tableNumber, references]) => [
-        tableNumber,
-        (references || []).filter(
-          (reference) =>
-            String(reference) !== String(guest._id) && reference !== guest.name,
-        ),
-      ]),
-    );
-    data.markModified(field);
+  if (guest.rsvpStatus === "Declined" && attendingPax !== 0) {
+    return "Declined guests must have zero attending pax";
   }
-}
-
-function seatingResponse(data) {
-  return {
-    seating: data.seating,
-    presidentialSeating: data.presidentialSeating,
-    seatingSettings: data.seatingSettings,
-    presidentialSettings: data.presidentialSettings,
-    guests: data.guests,
-  };
+  return null;
 }
 
 // GET /api/data — fetch all event data for current user
@@ -166,6 +120,12 @@ router.post("/guests", protect, async (req, res) => {
       tableNumber: null,
       _localId: Date.now(),
     };
+    if (guest.confirmed && req.body.rsvpStatus === undefined) {
+      guest.rsvpStatus = "Accepted";
+      guest.attendingPax = Number(guest.pax || 1);
+    }
+    const rsvpError = validateGuestRsvp(guest);
+    if (rsvpError) return res.status(400).json({ message: rsvpError });
     data.guests.push(guest);
     await data.save();
     res.status(201).json(data.guests[data.guests.length - 1]);
@@ -185,7 +145,15 @@ router.put("/guests/:id", protect, async (req, res) => {
       return res.status(409).json({ message: "Guest name already exists" });
     }
     normalizeSeating(data);
-    Object.assign(guest, pick({ ...req.body, name }, GUEST_FIELDS));
+    const updates = pick({ ...req.body, name }, GUEST_FIELDS);
+    if (updates.confirmed !== undefined && updates.rsvpStatus === undefined) {
+      updates.rsvpStatus = updates.confirmed ? "Accepted" : "Pending";
+      updates.attendingPax = updates.confirmed ? Number(updates.pax || guest.pax || 1) : 0;
+    }
+    const candidate = { ...guest.toObject(), ...updates };
+    const rsvpError = validateGuestRsvp(candidate);
+    if (rsvpError) return res.status(400).json({ message: rsvpError });
+    Object.assign(guest, updates);
     await data.save();
     res.json(guest);
   } catch (err) {
@@ -199,6 +167,7 @@ router.delete("/guests/:id", protect, async (req, res) => {
     const guest = data.guests.id(req.params.id);
     if (!guest) return res.status(404).json({ message: "Guest not found" });
     removeGuestFromSeating(data, guest);
+    await Invitation.deleteMany({ eventData: data._id, guestId: guest._id });
     data.guests = data.guests.filter((g) => g._id.toString() !== req.params.id);
     await data.save();
     res.json({ message: "Guest removed", ...seatingResponse(data) });
@@ -261,7 +230,7 @@ router.post("/seating/assign", protect, async (req, res) => {
     const map = { ...(data[field] || {}) };
     const references = [...(map[tableNumber] || [])];
     const occupiedPax = references.reduce(
-      (total, reference) => total + Number(resolveGuest(data, reference)?.pax || 1),
+      (total, reference) => total + guestPax(resolveGuest(data, reference)),
       0,
     );
     if (occupiedPax + Number(guest.pax || 1) > settings.maxPerTable) {

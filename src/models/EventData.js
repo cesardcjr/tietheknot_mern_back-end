@@ -147,6 +147,12 @@ const eventDataSchema = new mongoose.Schema(
       maxPerTable: { type: Number, default: 10, min: 1, max: 1000 },
     },
     presidentialSeating: { type: mongoose.Schema.Types.Mixed, default: {} },
+    seatingFloorPlan: {
+      paperSize: { type: String, enum: ["A4", "Letter", "Legal"], default: "A4" },
+      canvasWidth: { type: Number, default: 1200, min: 400, max: 3000 },
+      canvasHeight: { type: Number, default: 700, min: 300, max: 2000 },
+      elements: { type: [mongoose.Schema.Types.Mixed], default: [] },
+    },
     expenseSettings: {
       budget: { type: Number, default: 0, min: 0 },
       initialized: { type: Boolean, default: false },

@@ -39,6 +39,9 @@ const CHECKLIST_FIELDS = ["title", "details", "checked"];
 const PROGRAM_FIELDS = ["title", "startTime", "endTime", "details", "_start", "_end"];
 const SUPPLIER_FIELDS = ["supplierName", "categoryType", "quotedPrice", "contactPerson", "contactNum", "location", "links", "quoteDetails"];
 const EVENT_FIELDS = ["title", "targetDate"];
+const FLOOR_ELEMENT_TYPES = new Set(["table", "shape", "chair"]);
+const FLOOR_TABLE_KINDS = new Set(["round", "presidential", "free"]);
+const FLOOR_SHAPE_KINDS = new Set(["stage", "dance-floor", "custom"]);
 
 function pick(source, fields) {
   return Object.fromEntries(
@@ -58,6 +61,48 @@ function validateGuestRsvp(guest) {
     return "Declined guests must have zero attending pax";
   }
   return null;
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+}
+
+function sanitizeFloorPlan(input = {}) {
+  const paperSize = ["A4", "Letter", "Legal"].includes(input.paperSize) ? input.paperSize : "A4";
+  const canvasWidth = Math.round(clampNumber(input.canvasWidth, 400, 3000, 1200));
+  const canvasHeight = Math.round(clampNumber(input.canvasHeight, 300, 2000, 700));
+  const elements = Array.isArray(input.elements) ? input.elements.slice(0, 300).map((item, index) => {
+    const type = FLOOR_ELEMENT_TYPES.has(item.type) ? item.type : "shape";
+    const tableKind = FLOOR_TABLE_KINDS.has(item.tableKind) ? item.tableKind : "round";
+    const shapeKind = FLOOR_SHAPE_KINDS.has(item.shapeKind) ? item.shapeKind : "custom";
+    const isPresidential = tableKind === "presidential";
+    const x = clampNumber(item.x, 0, canvasWidth - 40, 80);
+    const y = clampNumber(item.y, 0, canvasHeight - 40, 80);
+    return {
+      id: String(item.id || `element-${Date.now()}-${index}`).slice(0, 80),
+      type,
+      tableKind: type === "table" ? tableKind : undefined,
+      shapeKind: type === "shape" ? shapeKind : undefined,
+      tableType: type === "table" ? (isPresidential ? "presidential" : "regular") : undefined,
+      tableNumber: type === "table" ? Math.round(clampNumber(item.tableNumber, 1, 10000, 1)) : undefined,
+      label: String(item.label || "").trim().slice(0, 80),
+      x,
+      y,
+      width: clampNumber(item.width, 40, canvasWidth - x, type === "chair" ? 44 : 160),
+      height: clampNumber(item.height, 40, canvasHeight - y, type === "chair" ? 44 : 140),
+      rotation: clampNumber(item.rotation, -180, 180, 0),
+      seatCount: type === "table" ? Math.round(clampNumber(item.seatCount, 1, isPresidential ? 24 : 50, isPresidential ? 12 : 8)) : 0,
+    };
+  }) : [];
+  return { paperSize, canvasWidth, canvasHeight, elements };
+}
+
+function floorTableCapacity(data, type, tableNumber, fallback) {
+  const element = data.seatingFloorPlan?.elements?.find(
+    (item) => item.type === "table" && item.tableType === type && Number(item.tableNumber) === Number(tableNumber),
+  );
+  return Number(element?.seatCount || fallback);
 }
 
 // GET /api/data — fetch all event data for current user
@@ -211,6 +256,30 @@ router.put("/seating-settings", protect, async (req, res) => {
   }
 });
 
+router.put("/seating/floor-plan", protect, async (req, res) => {
+  try {
+    const data = await getOrCreate(req.user._id);
+    normalizeSeating(data);
+    const floorPlan = sanitizeFloorPlan(req.body);
+    for (const element of floorPlan.elements.filter((item) => item.type === "table")) {
+      const field = element.tableType === "presidential" ? "presidentialSeating" : "seating";
+      const occupied = (data[field]?.[element.tableNumber] || []).reduce(
+        (total, reference) => total + guestPax(resolveGuest(data, reference)),
+        0,
+      );
+      if (occupied > element.seatCount) {
+        return res.status(409).json({ message: `${element.label || "Table"} already has ${occupied} seated pax` });
+      }
+    }
+    data.seatingFloorPlan = floorPlan;
+    data.markModified("seatingFloorPlan");
+    await data.save();
+    res.json(data.seatingFloorPlan);
+  } catch (err) {
+    res.status(err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
+  }
+});
+
 router.post("/seating/assign", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
@@ -233,7 +302,8 @@ router.post("/seating/assign", protect, async (req, res) => {
       (total, reference) => total + guestPax(resolveGuest(data, reference)),
       0,
     );
-    if (occupiedPax + Number(guest.pax || 1) > settings.maxPerTable) {
+    const capacity = floorTableCapacity(data, type, tableNumber, settings.maxPerTable);
+    if (occupiedPax + guestPax(guest) > capacity) {
       return res.status(409).json({ message: "Table capacity would be exceeded" });
     }
 
@@ -271,8 +341,15 @@ router.delete("/seating/reset", protect, async (req, res) => {
     data.presidentialSettings = { tableCount: 0, maxPerTable: 10 };
     data.seating = {};
     data.presidentialSeating = {};
+    data.seatingFloorPlan = {
+      paperSize: data.seatingFloorPlan?.paperSize || "A4",
+      canvasWidth: data.seatingFloorPlan?.canvasWidth || 1200,
+      canvasHeight: data.seatingFloorPlan?.canvasHeight || 700,
+      elements: [],
+    };
     data.markModified("seating");
     data.markModified("presidentialSeating");
+    data.markModified("seatingFloorPlan");
     normalizeSeating(data);
     await data.save();
     res.json(seatingResponse(data));
@@ -304,6 +381,21 @@ router.delete("/seating/tables/:type/:tableNumber", protect, async (req, res) =>
     }
     data[field] = shifted;
     data[settingsField].tableCount = settings.tableCount - 1;
+    if (data.seatingFloorPlan?.elements) {
+      data.seatingFloorPlan.elements = data.seatingFloorPlan.elements
+        .filter((item) => !(item.type === "table" && item.tableType === type && Number(item.tableNumber) === tableNumber))
+        .map((item) => {
+          if (item.type !== "table" || item.tableType !== type || Number(item.tableNumber) <= tableNumber) return item;
+          const oldNumber = Number(item.tableNumber);
+          const defaultOldLabel = item.tableKind === "presidential" ? `Presidential ${oldNumber}` : `Table ${oldNumber}`;
+          const nextNumber = oldNumber - 1;
+          const label = item.label === defaultOldLabel
+            ? (item.tableKind === "presidential" ? `Presidential ${nextNumber}` : `Table ${nextNumber}`)
+            : item.label;
+          return { ...item, tableNumber: nextNumber, label };
+        });
+      data.markModified("seatingFloorPlan");
+    }
     data.markModified(field);
     normalizeSeating(data);
     await data.save();

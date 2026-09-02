@@ -75,6 +75,7 @@ function seatingResponse(data) {
     presidentialSeating: data.presidentialSeating,
     seatingSettings: data.seatingSettings,
     presidentialSettings: data.presidentialSettings,
+    seatingFloorPlan: data.seatingFloorPlan,
     guests: data.guests,
   };
 }

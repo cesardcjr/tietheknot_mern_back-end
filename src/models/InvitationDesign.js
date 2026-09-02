@@ -96,6 +96,14 @@ const invitationDesignSchema = new mongoose.Schema(
     },
     assets: {
       coverImage: assetSchema,
+      coverCarousel: {
+        type: [assetSchema],
+        default: [],
+        validate: {
+          validator: (images) => images.length <= 8,
+          message: "The cover carousel can contain up to 8 images",
+        },
+      },
       welcomeImage: assetSchema,
       menDressImage: assetSchema,
       womenDressImage: assetSchema,

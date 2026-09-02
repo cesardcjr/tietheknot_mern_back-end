@@ -183,6 +183,12 @@ router.put("/design/current", async (req, res) => {
         .filter((key) => req.body.assets?.[key]?.secureUrl)
         .map((key) => [key, pick(req.body.assets[key], ASSET_FIELDS)]),
     );
+    assets.coverCarousel = Array.isArray(req.body.assets?.coverCarousel)
+      ? req.body.assets.coverCarousel
+        .filter((asset) => asset?.secureUrl)
+        .slice(0, 8)
+        .map((asset) => pick(asset, ASSET_FIELDS))
+      : [];
     const sections = Object.fromEntries(
       SECTION_KEYS.map((key) => [key, pick(req.body.sections?.[key], SECTION_STYLE_FIELDS)]),
     );

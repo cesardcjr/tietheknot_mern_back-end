@@ -1,6 +1,15 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 
+const SECRET_QUESTIONS = [
+  "What was the name of your first pet?",
+  "What was the name of the street you grew up on?",
+  "What was your childhood nickname?",
+  "What was the first name of your favorite teacher?",
+  "In which city were you born?",
+  "What is your favorite food?",
+];
+
 const userSchema = new mongoose.Schema({
   username: {
     type: String,
@@ -27,6 +36,14 @@ const userSchema = new mongoose.Schema({
     trim: true,
     maxlength: 40,
   },
+  secretQuestion: {
+    type: String,
+    enum: SECRET_QUESTIONS,
+  },
+  secretAnswerHash: {
+    type: String,
+    select: false,
+  },
   isAdmin: {
     type: Boolean,
     default: false,
@@ -52,6 +69,13 @@ userSchema.methods.matchPassword = async function (enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
 };
 
+userSchema.methods.matchSecretAnswer = async function (enteredAnswer) {
+  return await bcrypt.compare(
+    String(enteredAnswer || "").trim().toLowerCase(),
+    this.secretAnswerHash,
+  );
+};
+
 userSchema.methods.toSafeObject = function () {
   return {
     _id: this._id,
@@ -65,3 +89,4 @@ userSchema.methods.toSafeObject = function () {
 };
 
 module.exports = mongoose.model("User", userSchema);
+module.exports.SECRET_QUESTIONS = SECRET_QUESTIONS;

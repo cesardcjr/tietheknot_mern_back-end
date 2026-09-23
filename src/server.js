@@ -64,6 +64,7 @@ app.use(
   require("./routes/auth"),
 );
 app.use("/api/data", require("./routes/data"));
+app.use("/api/users", require("./routes/users"));
 app.use("/api/invitations", require("./routes/invitations"));
 app.use("/api/media", require("./routes/media"));
 app.use(

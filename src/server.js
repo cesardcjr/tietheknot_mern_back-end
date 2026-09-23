@@ -13,20 +13,32 @@ for (const key of ["MONGO_URI", "JWT_SECRET"]) {
   }
 }
 
-const allowedOrigins = [
-  ...(process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL || "")
+const parseCommaSeparated = (value) =>
+  String(value || "")
     .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean),
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const allowedOrigins = [
+  ...parseCommaSeparated(process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL),
   "https://tietheknot-mern-front-end.vercel.app",
   "http://localhost:5173",
   "http://localhost:5174",
   "http://localhost:3000",
 ].filter((origin, index, origins) => origins.indexOf(origin) === index);
 
+// Use '*' only for a hostname segment, for example:
+// https://tietheknot-mern-front-*.vercel.app
+// Keep this unset in production unless preview deployments are intentionally trusted.
+const allowedOriginPatterns = parseCommaSeparated(process.env.ALLOWED_ORIGIN_PATTERNS)
+  .map((pattern) => new RegExp(`^${pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, "[^/]+")}$`));
+
+const isAllowedOrigin = (origin) =>
+  !origin || allowedOrigins.includes(origin) || allowedOriginPatterns.some((pattern) => pattern.test(origin));
+
 const corsOptions = {
     origin: function (origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (isAllowedOrigin(origin)) {
         callback(null, true);
       } else {
         callback(new Error("Not allowed by CORS"));

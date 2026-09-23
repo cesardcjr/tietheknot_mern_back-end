@@ -6,6 +6,7 @@ Deploy the `staging` branch to a dedicated Render service. Configure its environ
 
 - A new MongoDB database, such as `tietheknot_staging`; never use the production database.
 - A unique staging `JWT_SECRET`.
+- `TRUST_PROXY_HOPS=1` so Express rate limits use the client IP forwarded by Render.
 - The exact staging Vercel frontend origins in `ALLOWED_ORIGINS`.
 
 For dynamic Vercel preview domains, set `ALLOWED_ORIGIN_PATTERNS=https://tietheknot-mern-front-*.vercel.app` on the staging Render service. This is intentionally opt-in and should not be copied to production unless every matching preview deployment is trusted.

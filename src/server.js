@@ -6,6 +6,11 @@ const connectDB = require("./config/db");
 
 const app = express();
 
+// Render forwards requests through its proxy layer. Trust exactly the nearest
+// proxy by default so rate limits use the forwarded client IP, not Render's IP.
+const configuredProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS || "1", 10);
+app.set("trust proxy", Number.isInteger(configuredProxyHops) && configuredProxyHops > 0 ? configuredProxyHops : 1);
+
 for (const key of ["MONGO_URI", "JWT_SECRET"]) {
   if (!process.env[key]) {
     console.error(`Missing required environment variable: ${key}`);

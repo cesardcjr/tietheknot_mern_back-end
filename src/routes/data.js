@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const EventData = require("../models/EventData");
 const Invitation = require("../models/Invitation");
+const { buildGuestParty } = require("../services/guestCompanions");
 const { protect } = require("../middleware/authMiddleware");
 const {
   guestPax,
@@ -154,6 +155,30 @@ router.get("/guests", protect, async (req, res) => {
 router.post("/guests", protect, async (req, res) => {
   try {
     const data = await getOrCreate(req.user._id);
+    if (req.body.companions !== undefined) {
+      let party;
+      try {
+        party = buildGuestParty(req.body, data.guests);
+      } catch (err) {
+        return res.status(400).json({ message: err.message });
+      }
+      const startIndex = data.guests.length;
+      for (const member of party) {
+        const guest = {
+          ...pick(member, GUEST_FIELDS), status: "Not Seated", tableNumber: null,
+          _localId: Date.now() + data.guests.length - startIndex,
+        };
+        if (guest.confirmed && member.rsvpStatus === undefined) {
+          guest.rsvpStatus = "Accepted";
+          guest.attendingPax = guest.pax;
+        }
+        const error = validateGuestRsvp(guest);
+        if (error) return res.status(400).json({ message: error });
+        data.guests.push(guest);
+      }
+      await data.save();
+      return res.status(201).json({ guests: data.guests.slice(startIndex) });
+    }
     const name = String(req.body.name || "").trim();
     if (!name) return res.status(400).json({ message: "Guest name is required" });
     if (data.guests.some((guest) => guest.name.toLowerCase() === name.toLowerCase())) {

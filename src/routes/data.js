@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const EventData = require("../models/EventData");
 const Invitation = require("../models/Invitation");
-const { buildGuestParty } = require("../services/guestCompanions");
+const { buildGuestParty, getCompanions, findMainGuest, setCompanionRemarks, updateGuestParty } = require("../services/guestCompanions");
 const { protect } = require("../middleware/authMiddleware");
 const {
   guestPax,
@@ -106,6 +106,20 @@ function floorTableCapacity(data, type, tableNumber, fallback) {
   return Number(element?.seatCount || fallback);
 }
 
+function overfilledTable(data) {
+  for (const [field, type, settings] of [
+    ["seating", "regular", data.seatingSettings],
+    ["presidentialSeating", "presidential", data.presidentialSettings],
+  ]) {
+    for (const [tableNumber, references] of Object.entries(data[field] || {})) {
+      const occupied = (references || []).reduce((total, reference) => total + guestPax(resolveGuest(data, reference)), 0);
+      const capacity = floorTableCapacity(data, type, tableNumber, settings.maxPerTable);
+      if (occupied > capacity) return `Table ${tableNumber} would exceed its ${capacity}-pax capacity. Adjust its seating first.`;
+    }
+  }
+  return null;
+}
+
 // GET /api/data — fetch all event data for current user
 router.get("/", protect, async (req, res) => {
   try {
@@ -163,11 +177,13 @@ router.post("/guests", protect, async (req, res) => {
         return res.status(400).json({ message: err.message });
       }
       const startIndex = data.guests.length;
+      let mainId = null;
       for (const member of party) {
         const guest = {
           ...pick(member, GUEST_FIELDS), status: "Not Seated", tableNumber: null,
           _localId: Date.now() + data.guests.length - startIndex,
         };
+        if (mainId) guest.companionOf = mainId;
         if (guest.confirmed && member.rsvpStatus === undefined) {
           guest.rsvpStatus = "Accepted";
           guest.attendingPax = guest.pax;
@@ -175,6 +191,7 @@ router.post("/guests", protect, async (req, res) => {
         const error = validateGuestRsvp(guest);
         if (error) return res.status(400).json({ message: error });
         data.guests.push(guest);
+        if (!mainId) mainId = data.guests[data.guests.length - 1]._id;
       }
       await data.save();
       return res.status(201).json({ guests: data.guests.slice(startIndex) });
@@ -209,6 +226,29 @@ router.put("/guests/:id", protect, async (req, res) => {
     const data = await getOrCreate(req.user._id);
     const guest = data.guests.id(req.params.id);
     if (!guest) return res.status(404).json({ message: "Guest not found" });
+    if (req.body.companions !== undefined) {
+      if (findMainGuest(data, guest)) return res.status(400).json({ message: "Edit companions from the main guest" });
+      normalizeSeating(data);
+      const updates = pick(req.body, ["category", "confirmed", "listedBy"]);
+      Object.assign(guest, updates);
+      if (updates.confirmed !== undefined) {
+        guest.rsvpStatus = updates.confirmed ? "Accepted" : "Pending";
+      }
+      let result;
+      try {
+        result = updateGuestParty(data, guest, req.body, removeGuestFromSeating);
+      } catch (err) {
+        return res.status(400).json({ message: err.message });
+      }
+      if (updates.confirmed !== undefined) result.main.attendingPax = updates.confirmed ? result.main.pax : 0;
+      const capacityError = overfilledTable(data);
+      if (capacityError) return res.status(409).json({ message: capacityError });
+      await data.save();
+      if (result.removed.length) await Invitation.deleteMany({ eventData: data._id, guestId: { $in: result.removed.map((item) => item._id) } });
+      return res.json(seatingResponse(data));
+    }
+    const parent = findMainGuest(data, guest);
+    const linkedChildren = parent ? [] : getCompanions(data, guest);
     const name = req.body.name === undefined ? guest.name : String(req.body.name).trim();
     if (!name) return res.status(400).json({ message: "Guest name is required" });
     if (data.guests.some((item) => String(item._id) !== String(guest._id) && item.name.toLowerCase() === name.toLowerCase())) {
@@ -216,6 +256,7 @@ router.put("/guests/:id", protect, async (req, res) => {
     }
     normalizeSeating(data);
     const updates = pick({ ...req.body, name }, GUEST_FIELDS);
+    if (parent && updates.pax !== undefined && Number(updates.pax) !== 1) return res.status(400).json({ message: "A named companion must have 1 pax" });
     if (updates.confirmed !== undefined && updates.rsvpStatus === undefined) {
       updates.rsvpStatus = updates.confirmed ? "Accepted" : "Pending";
       updates.attendingPax = updates.confirmed ? Number(updates.pax || guest.pax || 1) : 0;
@@ -224,6 +265,19 @@ router.put("/guests/:id", protect, async (req, res) => {
     const rsvpError = validateGuestRsvp(candidate);
     if (rsvpError) return res.status(400).json({ message: rsvpError });
     Object.assign(guest, updates);
+    if (parent) {
+      guest.companionOf = parent._id;
+      guest.remarks = `Companion of ${parent.name}`;
+      setCompanionRemarks(data, parent);
+    } else {
+      if (linkedChildren.length) {
+        for (const child of linkedChildren) {
+          child.companionOf = guest._id;
+          child.remarks = `Companion of ${guest.name}`;
+        }
+        setCompanionRemarks(data, guest);
+      }
+    }
     await data.save();
     res.json(guest);
   } catch (err) {
@@ -236,9 +290,19 @@ router.delete("/guests/:id", protect, async (req, res) => {
     const data = await getOrCreate(req.user._id);
     const guest = data.guests.id(req.params.id);
     if (!guest) return res.status(404).json({ message: "Guest not found" });
+    const parent = findMainGuest(data, guest);
+    const children = parent ? [] : getCompanions(data, guest);
     removeGuestFromSeating(data, guest);
     await Invitation.deleteMany({ eventData: data._id, guestId: guest._id });
     data.guests = data.guests.filter((g) => g._id.toString() !== req.params.id);
+    if (parent) setCompanionRemarks(data, data.guests.id(parent._id));
+    for (const child of children) {
+      const remaining = data.guests.id(child._id);
+      if (remaining) {
+        remaining.companionOf = null;
+        remaining.remarks = "";
+      }
+    }
     await data.save();
     res.json({ message: "Guest removed", ...seatingResponse(data) });
   } catch (err) {

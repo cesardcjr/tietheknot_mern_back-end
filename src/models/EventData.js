@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const guestSchema = new mongoose.Schema(
   {
     _localId: Number,
+    companionOf: { type: mongoose.Schema.Types.ObjectId, default: null },
     name: { type: String, required: true, trim: true, maxlength: 120 },
     pax: { type: Number, default: 1, min: 1, max: 50 },
     category: {

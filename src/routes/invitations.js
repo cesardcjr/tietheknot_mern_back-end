@@ -1,6 +1,8 @@
 const express = require("express");
 const { randomBytes } = require("node:crypto");
-const { guestCode } = require("../utils/sharedInvitation");
+const RsvpResponse = require("../models/RsvpResponse");
+const { isValidObjectId } = require("mongoose");
+const { normalizeSeating, removeGuestFromSeating } = require("../services/seatingService");
 const EventData = require("../models/EventData");
 const Invitation = require("../models/Invitation");
 const InvitationDesign = require("../models/InvitationDesign");
@@ -85,12 +87,84 @@ router.get("/bootstrap", async (req, res) => {
     res.json({
       event: eventData.event || null,
       invitationSettings: eventData.invitationSettings,
-      guests: eventData.guests.map((guest) => ({ ...guest.toObject(), rsvpCode: guestCode(eventData._id, guest._id) })),
+      guests: eventData.guests,
       design,
       invitations: design?.sharedKey ? [] : invitations.map(invitationDto),
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+});
+
+router.get("/rsvp/responses", async (req, res) => {
+  try {
+    const event = await EventData.findOne({ user: req.user._id }).select("_id").lean();
+    if (!event) return res.status(404).json({ message: "Event not found" });
+    const pageSize = 10;
+    const filter = { eventData: event._id };
+    const [total, checked] = await Promise.all([
+      RsvpResponse.countDocuments(filter), RsvpResponse.countDocuments({ ...filter, checked: true }),
+    ]);
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(pages, Math.max(1, Number.parseInt(req.query.page, 10) || 1));
+    const rows = await RsvpResponse.find(filter).select("fullName response declineReason checked createdAt")
+      .sort({ createdAt: -1, _id: -1 }).skip((page - 1) * pageSize).limit(pageSize).lean();
+    res.set("Cache-Control", "no-store").json({ rows, total, checked, pages, page });
+  } catch { res.status(500).json({ message: "Unable to load RSVP responses" }); }
+});
+
+router.patch("/rsvp/responses/:id", async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id) || typeof req.body.checked !== "boolean") {
+      return res.status(400).json({ message: "Select a valid response and checkbox value" });
+    }
+    const event = await EventData.findOne({ user: req.user._id }).select("_id").lean();
+    const updated = event && await RsvpResponse.findOneAndUpdate(
+      { _id: req.params.id, eventData: event._id }, { $set: { checked: req.body.checked } }, { new: true },
+    ).select("checked");
+    if (!updated) return res.status(404).json({ message: "RSVP response not found" });
+    res.json({ checked: updated.checked });
+  } catch { res.status(500).json({ message: "Unable to update the checkbox" }); }
+});
+
+router.get("/rsvp/guest-updates", async (req, res) => {
+  try {
+    const event = await EventData.findOne({ user: req.user._id }).select("guests").lean();
+    if (!event) return res.status(404).json({ message: "Event not found" });
+    const guests = event.guests.filter((guest) => guest.respondedAt).map(({
+      _id, rsvpStatus, confirmed, attendingPax, respondedAt, declineReason, status, tableNumber,
+    }) => ({ _id, rsvpStatus, confirmed, attendingPax, respondedAt, declineReason, status, tableNumber }));
+    res.set("Cache-Control", "no-store").json({ guests });
+  } catch { res.status(500).json({ message: "Unable to refresh guest confirmations" }); }
+});
+
+router.patch("/rsvp/guests/:id", async (req, res) => {
+  try {
+    const { response } = req.body;
+    if (!isValidObjectId(req.params.id) || !["Accepted", "Declined"].includes(response)) {
+      return res.status(400).json({ message: "Select a valid guest and response" });
+    }
+    const event = await eventFor(req.user._id);
+    const guest = event?.guests.id(req.params.id);
+    if (!guest) return res.status(404).json({ message: "Guest not found" });
+    guest.rsvpStatus = response;
+    guest.confirmed = response === "Accepted";
+    guest.attendingPax = guest.confirmed ? Number(guest.pax || 1) : 0;
+    if (guest.confirmed) guest.declineReason = "";
+    guest.respondedAt = new Date();
+    if (!guest.confirmed) {
+      removeGuestFromSeating(event, guest);
+      normalizeSeating(event);
+    }
+    event.$where = { __v: event.__v };
+    event.increment();
+    await event.save();
+    res.json({ guest });
+  } catch (error) {
+    if (["VersionError", "DocumentNotFoundError"].includes(error.name)) {
+      return res.status(409).json({ message: "The guest list changed. Please try again." });
+    }
+    res.status(500).json({ message: "Unable to update the guest response" });
   }
 });
 

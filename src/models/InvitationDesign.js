@@ -52,13 +52,35 @@ const colorPalette = {
 const isYouTubeUrl = (value) =>
   !value || /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)[A-Za-z0-9_-]{6,}(?:[?&][^\s]*)?$/i.test(value);
 
+const gallery = {
+  type: [assetSchema],
+  default: undefined,
+  validate: [(images) => images.length <= 3, "A dress-code gallery supports up to three images"],
+};
+
+const heading = { type: String, trim: true, maxlength: 160 };
+const mapLocation = {
+  type: String,
+  trim: true,
+  maxlength: 2048,
+  validate: [(value) => !value || Boolean(require("../utils/mapLocation")(value)), "Enter a Google Maps link or latitude, longitude"],
+};
+
 const invitationDesignSchema = new mongoose.Schema(
   {
     owner: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     eventData: { type: mongoose.Schema.Types.ObjectId, ref: "EventData", required: true, unique: true },
     templateKey: { type: String, trim: true, maxlength: 80, default: "garden" },
     published: { type: Boolean, default: false },
+    sharedKey: { type: String, unique: true, sparse: true },
+    publishedSnapshot: { type: mongoose.Schema.Types.Mixed, select: false },
     content: {
+      welcomeHeadline: heading,
+      seatingHeading: heading,
+      dressHeading: heading,
+      videoHeading: heading,
+      ceremonyMap: mapLocation,
+      receptionMap: mapLocation,
       coupleNames: { type: String, trim: true, maxlength: 160, default: "Our Wedding" },
       headline: { type: String, trim: true, maxlength: 200, default: "We're getting married" },
       welcomeMessage: { type: String, trim: true, maxlength: 2000, default: "Together with our families, we invite you to celebrate with us." },
@@ -107,6 +129,10 @@ const invitationDesignSchema = new mongoose.Schema(
       welcomeImage: assetSchema,
       menDressImage: assetSchema,
       womenDressImage: assetSchema,
+      menDressImages: gallery,
+      womenDressImages: gallery,
+      ceremonyImage: assetSchema,
+      receptionImage: assetSchema,
       closingImage: assetSchema,
     },
     sections: {

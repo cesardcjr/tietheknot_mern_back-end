@@ -1,4 +1,6 @@
 const express = require("express");
+const { randomBytes } = require("node:crypto");
+const { guestCode } = require("../utils/sharedInvitation");
 const EventData = require("../models/EventData");
 const Invitation = require("../models/Invitation");
 const InvitationDesign = require("../models/InvitationDesign");
@@ -12,6 +14,7 @@ const CONTENT_FIELDS = [
   "coupleNames",
   "headline",
   "welcomeMessage",
+  "welcomeHeadline", "seatingHeading", "dressHeading", "videoHeading", "ceremonyMap", "receptionMap",
   "videoMessage",
   "youtubeUrl",
   "ceremonyVenue",
@@ -33,7 +36,7 @@ const CONTENT_FIELDS = [
 ];
 const THEME_FIELDS = ["primary", "accent", "background", "text", "fontPair"];
 const ASSET_FIELDS = ["publicId", "secureUrl", "width", "height", "format", "alt"];
-const ASSET_KEYS = ["coverImage", "welcomeImage", "menDressImage", "womenDressImage", "closingImage"];
+const ASSET_KEYS = ["coverImage", "welcomeImage", "menDressImage", "womenDressImage", "ceremonyImage", "receptionImage", "closingImage"];
 const SECTION_KEYS = ["cover", "welcome", "closing"];
 const SECTION_STYLE_FIELDS = ["backgroundColor", "backgroundOpacity", "imageOpacity", "fontFamily", "fontSize"];
 const TEXT_STYLE_FIELDS = ["fontFamily", "fontSize", "textColor"];
@@ -82,9 +85,9 @@ router.get("/bootstrap", async (req, res) => {
     res.json({
       event: eventData.event || null,
       invitationSettings: eventData.invitationSettings,
-      guests: eventData.guests,
+      guests: eventData.guests.map((guest) => ({ ...guest.toObject(), rsvpCode: guestCode(eventData._id, guest._id) })),
       design,
-      invitations: invitations.map(invitationDto),
+      invitations: design?.sharedKey ? [] : invitations.map(invitationDto),
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -189,6 +192,27 @@ router.put("/design/current", async (req, res) => {
         .slice(0, 8)
         .map((asset) => pick(asset, ASSET_FIELDS))
       : [];
+    const ownedAsset = (asset) => {
+      const prefix = "tietheknot/" + req.user._id + "/invitations/";
+      try {
+        const url = new URL(asset.secureUrl);
+        return asset.publicId?.startsWith(prefix) && url.protocol === "https:" &&
+          url.hostname === "res.cloudinary.com" &&
+          decodeURIComponent(url.pathname).startsWith("/" + process.env.CLOUDINARY_CLOUD_NAME + "/image/upload/") &&
+          decodeURIComponent(url.pathname).includes("/" + asset.publicId + ".");
+      } catch { return false; }
+    };
+    for (const key of ["menDressImages", "womenDressImages"]) {
+      if (req.body.assets?.[key] === undefined) continue;
+      const images = req.body.assets[key];
+      if (!Array.isArray(images) || images.length > 3 || images.some((asset) => !ownedAsset(asset))) {
+        return res.status(400).json({ message: "Select up to three images uploaded to your Studio account." });
+      }
+      assets[key] = images.map((asset) => pick(asset, ASSET_FIELDS));
+    }
+    for (const key of ["ceremonyImage", "receptionImage"]) {
+      if (assets[key] && !ownedAsset(assets[key])) return res.status(400).json({ message: "Use a venue image uploaded to your Studio account." });
+    }
     const sections = Object.fromEntries(
       SECTION_KEYS.map((key) => [key, pick(req.body.sections?.[key], SECTION_STYLE_FIELDS)]),
     );
@@ -197,7 +221,7 @@ router.put("/design/current", async (req, res) => {
       owner: req.user._id,
       eventData: eventData._id,
       templateKey: String(req.body.templateKey || "garden").trim(),
-      published: Boolean(req.body.published),
+      ...(typeof req.body.published === "boolean" ? { published: req.body.published } : {}),
       content: pick(req.body.content, CONTENT_FIELDS),
       theme: pick(req.body.theme, THEME_FIELDS),
       assets,
@@ -211,6 +235,29 @@ router.put("/design/current", async (req, res) => {
     res.json(design);
   } catch (err) {
     res.status(err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
+  }
+});
+
+router.post("/design/publish", async (req, res) => {
+  try {
+    const eventData = await eventFor(req.user._id);
+    if (!eventData) return res.status(404).json({ message: "Event data not found" });
+    const design = await InvitationDesign.findOne({ eventData: eventData._id, owner: req.user._id });
+    if (!design) return res.status(404).json({ message: "Save your design before publishing." });
+    const published = req.body.published === true;
+    if (published) {
+      const { templateKey, content, theme, assets, sections } = design.toObject();
+      design.sharedKey ||= randomBytes(18).toString("base64url");
+      design.publishedSnapshot = { templateKey, content, theme, assets, sections };
+    }
+    design.published = published;
+    await design.save();
+    res.json(design.toObject({ transform: (doc, value) => {
+      delete value.publishedSnapshot;
+      return value;
+    } }));
+  } catch {
+    res.status(500).json({ message: "Unable to update publication." });
   }
 });
 

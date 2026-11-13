@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { FONT_FAMILIES, TYPOGRAPHY_FIELDS } = require("../utils/invitationTypography");
 
 const assetSchema = new mongoose.Schema(
   {
@@ -8,6 +9,7 @@ const assetSchema = new mongoose.Schema(
     height: { type: Number, min: 1 },
     format: { type: String, trim: true, maxlength: 20 },
     alt: { type: String, trim: true, maxlength: 300 },
+    footerNote: { type: String, trim: true, maxlength: 300 },
   },
   { _id: false },
 );
@@ -19,7 +21,7 @@ const sectionStyleSchema = new mongoose.Schema(
     imageOpacity: { type: Number, default: 0.72, min: 0, max: 1 },
     fontFamily: {
       type: String,
-      enum: ["classic", "modern", "romantic", "elegant"],
+      enum: FONT_FAMILIES,
       default: "classic",
     },
     fontSize: { type: Number, default: 64, min: 24, max: 120 },
@@ -31,7 +33,7 @@ const textStyleSchema = new mongoose.Schema(
   {
     fontFamily: {
       type: String,
-      enum: ["classic", "modern", "romantic", "elegant"],
+      enum: FONT_FAMILIES,
       default: "classic",
     },
     fontSize: { type: Number, default: 34, min: 14, max: 80 },
@@ -49,8 +51,30 @@ const colorPalette = {
   },
 };
 
+const typographySchema = new mongoose.Schema(
+  {
+    fontFamily: { type: String, enum: FONT_FAMILIES },
+    fontSize: { type: Number, min: 12, max: 80 },
+  },
+  { _id: false },
+);
+
 const isYouTubeUrl = (value) =>
   !value || /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)[A-Za-z0-9_-]{6,}(?:[?&][^\s]*)?$/i.test(value);
+
+const gallery = {
+  type: [assetSchema],
+  default: undefined,
+  validate: [(images) => images.length <= 3, "A dress-code gallery supports up to three images"],
+};
+
+const heading = { type: String, trim: true, maxlength: 160 };
+const mapLocation = {
+  type: String,
+  trim: true,
+  maxlength: 2048,
+  validate: [(value) => !value || Boolean(require("../utils/mapLocation")(value)), "Enter a Google Maps link or latitude, longitude"],
+};
 
 const invitationDesignSchema = new mongoose.Schema(
   {
@@ -58,7 +82,19 @@ const invitationDesignSchema = new mongoose.Schema(
     eventData: { type: mongoose.Schema.Types.ObjectId, ref: "EventData", required: true, unique: true },
     templateKey: { type: String, trim: true, maxlength: 80, default: "garden" },
     published: { type: Boolean, default: false },
+    sharedKey: { type: String, unique: true, sparse: true },
+    publishedSnapshot: { type: mongoose.Schema.Types.Mixed, select: false },
     content: {
+      coverMonogram: { type: String, trim: true, maxlength: 12 },
+      dressGeneralNotes: { type: String, trim: true, maxlength: 1000 },
+      rsvpTitle: heading,
+      rsvpButtonText: { type: String, trim: true, maxlength: 80 },
+      welcomeHeadline: heading,
+      seatingHeading: heading,
+      dressHeading: heading,
+      videoHeading: heading,
+      ceremonyMap: mapLocation,
+      receptionMap: mapLocation,
       coupleNames: { type: String, trim: true, maxlength: 160, default: "Our Wedding" },
       headline: { type: String, trim: true, maxlength: 200, default: "We're getting married" },
       welcomeMessage: { type: String, trim: true, maxlength: 2000, default: "Together with our families, we invite you to celebrate with us." },
@@ -95,6 +131,7 @@ const invitationDesignSchema = new mongoose.Schema(
       fontPair: { type: String, enum: ["classic", "modern", "romantic"], default: "classic" },
     },
     assets: {
+      coverLogo: assetSchema,
       coverImage: assetSchema,
       coverCarousel: {
         type: [assetSchema],
@@ -107,9 +144,17 @@ const invitationDesignSchema = new mongoose.Schema(
       welcomeImage: assetSchema,
       menDressImage: assetSchema,
       womenDressImage: assetSchema,
+      menDressImages: gallery,
+      womenDressImages: gallery,
+      ceremonyImage: assetSchema,
+      receptionImage: assetSchema,
       closingImage: assetSchema,
     },
     sections: {
+      typography: new mongoose.Schema(
+        Object.fromEntries(TYPOGRAPHY_FIELDS.map((key) => [key, typographySchema])),
+        { _id: false },
+      ),
       cover: { type: sectionStyleSchema, default: () => ({ backgroundColor: "#315c4c", backgroundOpacity: 1, imageOpacity: 0.72, fontFamily: "classic", fontSize: 72 }) },
       welcome: { type: sectionStyleSchema, default: () => ({ backgroundColor: "#fbf8f1", backgroundOpacity: 1, imageOpacity: 0.35, fontFamily: "classic", fontSize: 38 }) },
       greeting: { type: textStyleSchema, default: () => ({ fontFamily: "classic", fontSize: 34, textColor: "#315c4c" }) },

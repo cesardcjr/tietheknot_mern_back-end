@@ -1,10 +1,13 @@
-require("dotenv").config();
+require("dotenv").config({ path: require("node:path").resolve(__dirname, "../.env") });
 const express = require("express");
 const cors = require("cors");
 const { rateLimit } = require("express-rate-limit");
 const connectDB = require("./config/db");
 
 const app = express();
+
+const configuredProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS || "1", 10);
+app.set("trust proxy", Number.isInteger(configuredProxyHops) && configuredProxyHops > 0 ? configuredProxyHops : 1);
 
 for (const key of ["MONGO_URI", "JWT_SECRET"]) {
   if (!process.env[key]) {
@@ -19,6 +22,7 @@ const allowedOrigins = [
     .map((origin) => origin.trim())
     .filter(Boolean),
   "https://tietheknot-mern-front-end.vercel.app",
+  new URL(process.env.INVITATION_STUDIO_URL || "https://tietheknot-invitation-maker.vercel.app").origin,
   "http://localhost:5173",
   "http://localhost:5174",
   "http://localhost:3000",

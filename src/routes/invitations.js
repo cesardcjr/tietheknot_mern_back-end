@@ -1,17 +1,24 @@
 const express = require("express");
+const { randomBytes } = require("node:crypto");
+const RsvpResponse = require("../models/RsvpResponse");
+const { isValidObjectId } = require("mongoose");
+const { normalizeSeating, removeGuestFromSeating } = require("../services/seatingService");
 const EventData = require("../models/EventData");
 const Invitation = require("../models/Invitation");
 const InvitationDesign = require("../models/InvitationDesign");
 const { protect } = require("../middleware/authMiddleware");
 const { createInvitationToken } = require("../utils/invitationToken");
+const { TYPOGRAPHY_FIELDS } = require("../utils/invitationTypography");
 
 const router = express.Router();
 router.use(protect);
 
 const CONTENT_FIELDS = [
+  "coverMonogram", "dressGeneralNotes", "rsvpTitle", "rsvpButtonText",
   "coupleNames",
   "headline",
   "welcomeMessage",
+  "welcomeHeadline", "seatingHeading", "dressHeading", "videoHeading", "ceremonyMap", "receptionMap",
   "videoMessage",
   "youtubeUrl",
   "ceremonyVenue",
@@ -32,13 +39,14 @@ const CONTENT_FIELDS = [
   "closingMessage",
 ];
 const THEME_FIELDS = ["primary", "accent", "background", "text", "fontPair"];
-const ASSET_FIELDS = ["publicId", "secureUrl", "width", "height", "format", "alt"];
-const ASSET_KEYS = ["coverImage", "welcomeImage", "menDressImage", "womenDressImage", "closingImage"];
+const ASSET_FIELDS = ["publicId", "secureUrl", "width", "height", "format", "alt", "footerNote"];
+const ASSET_KEYS = ["coverLogo", "coverImage", "welcomeImage", "menDressImage", "womenDressImage", "ceremonyImage", "receptionImage", "closingImage"];
 const SECTION_KEYS = ["cover", "welcome", "closing"];
 const SECTION_STYLE_FIELDS = ["backgroundColor", "backgroundOpacity", "imageOpacity", "fontFamily", "fontSize"];
 const TEXT_STYLE_FIELDS = ["fontFamily", "fontSize", "textColor"];
 
 function pick(source = {}, fields) {
+  if (!source || typeof source !== "object") return {};
   return Object.fromEntries(
     fields.filter((field) => source[field] !== undefined).map((field) => [field, source[field]]),
   );
@@ -84,10 +92,82 @@ router.get("/bootstrap", async (req, res) => {
       invitationSettings: eventData.invitationSettings,
       guests: eventData.guests,
       design,
-      invitations: invitations.map(invitationDto),
+      invitations: design?.sharedKey ? [] : invitations.map(invitationDto),
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+});
+
+router.get("/rsvp/responses", async (req, res) => {
+  try {
+    const event = await EventData.findOne({ user: req.user._id }).select("_id").lean();
+    if (!event) return res.status(404).json({ message: "Event not found" });
+    const pageSize = 10;
+    const filter = { eventData: event._id };
+    const [total, checked] = await Promise.all([
+      RsvpResponse.countDocuments(filter), RsvpResponse.countDocuments({ ...filter, checked: true }),
+    ]);
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(pages, Math.max(1, Number.parseInt(req.query.page, 10) || 1));
+    const rows = await RsvpResponse.find(filter).select("fullName response declineReason checked createdAt")
+      .sort({ createdAt: -1, _id: -1 }).skip((page - 1) * pageSize).limit(pageSize).lean();
+    res.set("Cache-Control", "no-store").json({ rows, total, checked, pages, page });
+  } catch { res.status(500).json({ message: "Unable to load RSVP responses" }); }
+});
+
+router.patch("/rsvp/responses/:id", async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id) || typeof req.body.checked !== "boolean") {
+      return res.status(400).json({ message: "Select a valid response and checkbox value" });
+    }
+    const event = await EventData.findOne({ user: req.user._id }).select("_id").lean();
+    const updated = event && await RsvpResponse.findOneAndUpdate(
+      { _id: req.params.id, eventData: event._id }, { $set: { checked: req.body.checked } }, { new: true },
+    ).select("checked");
+    if (!updated) return res.status(404).json({ message: "RSVP response not found" });
+    res.json({ checked: updated.checked });
+  } catch { res.status(500).json({ message: "Unable to update the checkbox" }); }
+});
+
+router.get("/rsvp/guest-updates", async (req, res) => {
+  try {
+    const event = await EventData.findOne({ user: req.user._id }).select("guests").lean();
+    if (!event) return res.status(404).json({ message: "Event not found" });
+    const guests = event.guests.filter((guest) => guest.respondedAt).map(({
+      _id, rsvpStatus, confirmed, attendingPax, respondedAt, declineReason, status, tableNumber,
+    }) => ({ _id, rsvpStatus, confirmed, attendingPax, respondedAt, declineReason, status, tableNumber }));
+    res.set("Cache-Control", "no-store").json({ guests });
+  } catch { res.status(500).json({ message: "Unable to refresh guest confirmations" }); }
+});
+
+router.patch("/rsvp/guests/:id", async (req, res) => {
+  try {
+    const { response } = req.body;
+    if (!isValidObjectId(req.params.id) || !["Accepted", "Declined"].includes(response)) {
+      return res.status(400).json({ message: "Select a valid guest and response" });
+    }
+    const event = await eventFor(req.user._id);
+    const guest = event?.guests.id(req.params.id);
+    if (!guest) return res.status(404).json({ message: "Guest not found" });
+    guest.rsvpStatus = response;
+    guest.confirmed = response === "Accepted";
+    guest.attendingPax = guest.confirmed ? Number(guest.pax || 1) : 0;
+    if (guest.confirmed) guest.declineReason = "";
+    guest.respondedAt = new Date();
+    if (!guest.confirmed) {
+      removeGuestFromSeating(event, guest);
+      normalizeSeating(event);
+    }
+    event.$where = { __v: event.__v };
+    event.increment();
+    await event.save();
+    res.json({ guest });
+  } catch (error) {
+    if (["VersionError", "DocumentNotFoundError"].includes(error.name)) {
+      return res.status(409).json({ message: "The guest list changed. Please try again." });
+    }
+    res.status(500).json({ message: "Unable to update the guest response" });
   }
 });
 
@@ -189,15 +269,42 @@ router.put("/design/current", async (req, res) => {
         .slice(0, 8)
         .map((asset) => pick(asset, ASSET_FIELDS))
       : [];
+    const ownedAsset = (asset) => {
+      const prefix = "tietheknot/" + req.user._id + "/invitations/";
+      try {
+        const url = new URL(asset.secureUrl);
+        return asset.publicId?.startsWith(prefix) && url.protocol === "https:" &&
+          url.hostname === "res.cloudinary.com" &&
+          decodeURIComponent(url.pathname).startsWith("/" + process.env.CLOUDINARY_CLOUD_NAME + "/image/upload/") &&
+          decodeURIComponent(url.pathname).includes("/" + asset.publicId + ".");
+      } catch { return false; }
+    };
+    for (const key of ["menDressImages", "womenDressImages"]) {
+      if (req.body.assets?.[key] === undefined) continue;
+      const images = req.body.assets[key];
+      if (!Array.isArray(images) || images.length > 3 || images.some((asset) => !ownedAsset(asset))) {
+        return res.status(400).json({ message: "Select up to three images uploaded to your Studio account." });
+      }
+      assets[key] = images.map((asset) => pick(asset, ASSET_FIELDS));
+    }
+    for (const key of ["ceremonyImage", "receptionImage"]) {
+      if (assets[key] && !ownedAsset(assets[key])) return res.status(400).json({ message: "Use a venue image uploaded to your Studio account." });
+    }
+    if (assets.coverLogo && !ownedAsset(assets.coverLogo)) {
+      return res.status(400).json({ message: "Use a cover logo uploaded to your Studio account." });
+    }
     const sections = Object.fromEntries(
       SECTION_KEYS.map((key) => [key, pick(req.body.sections?.[key], SECTION_STYLE_FIELDS)]),
     );
     sections.greeting = pick(req.body.sections?.greeting, TEXT_STYLE_FIELDS);
+    sections.typography = Object.fromEntries(TYPOGRAPHY_FIELDS
+      .filter((key) => req.body.sections?.typography?.[key])
+      .map((key) => [key, pick(req.body.sections.typography[key], ["fontFamily", "fontSize"])]));
     const update = {
       owner: req.user._id,
       eventData: eventData._id,
       templateKey: String(req.body.templateKey || "garden").trim(),
-      published: Boolean(req.body.published),
+      ...(typeof req.body.published === "boolean" ? { published: req.body.published } : {}),
       content: pick(req.body.content, CONTENT_FIELDS),
       theme: pick(req.body.theme, THEME_FIELDS),
       assets,
@@ -211,6 +318,29 @@ router.put("/design/current", async (req, res) => {
     res.json(design);
   } catch (err) {
     res.status(err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
+  }
+});
+
+router.post("/design/publish", async (req, res) => {
+  try {
+    const eventData = await eventFor(req.user._id);
+    if (!eventData) return res.status(404).json({ message: "Event data not found" });
+    const design = await InvitationDesign.findOne({ eventData: eventData._id, owner: req.user._id });
+    if (!design) return res.status(404).json({ message: "Save your design before publishing." });
+    const published = req.body.published === true;
+    if (published) {
+      const { templateKey, content, theme, assets, sections } = design.toObject();
+      design.sharedKey ||= randomBytes(18).toString("base64url");
+      design.publishedSnapshot = { templateKey, content, theme, assets, sections };
+    }
+    design.published = published;
+    await design.save();
+    res.json(design.toObject({ transform: (doc, value) => {
+      delete value.publishedSnapshot;
+      return value;
+    } }));
+  } catch {
+    res.status(500).json({ message: "Unable to update publication." });
   }
 });
 

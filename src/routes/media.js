@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const express = require("express");
+const InvitationDesign = require("../models/InvitationDesign");
 const { protect } = require("../middleware/authMiddleware");
 
 const router = express.Router();
@@ -22,7 +23,7 @@ function sign(params, secret) {
 
 router.post("/signature", (req, res) => {
   const config = cloudinaryConfig();
-  if (!config) return res.status(503).json({ message: "Cloudinary is not configured" });
+  if (!config) return res.status(503).json({ message: "Cloudinary is not configured on the backend serving Invitation Studio." });
   const timestamp = Math.floor(Date.now() / 1000);
   const params = {
     folder: `tietheknot/${req.user._id}/invitations`,
@@ -48,6 +49,10 @@ router.delete("/image", async (req, res) => {
     if (!publicId.startsWith(allowedPrefix)) {
       return res.status(403).json({ message: "Image does not belong to this account" });
     }
+    const design = await InvitationDesign.findOne({ owner: req.user._id }).select("assets +publishedSnapshot").lean();
+    const referenced = [design?.assets, design?.publishedSnapshot?.assets].some((assets) =>
+      Object.values(assets || {}).flat().some((asset) => asset?.publicId === publicId));
+    if (referenced) return res.status(409).json({ message: "This image is still used by a saved invitation" });
     const timestamp = Math.floor(Date.now() / 1000);
     const params = { invalidate: true, public_id: publicId, timestamp };
     const body = new URLSearchParams({

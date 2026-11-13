@@ -1,6 +1,17 @@
 const mongoose = require("mongoose");
 const { FONT_FAMILIES, TYPOGRAPHY_FIELDS } = require("../utils/invitationTypography");
 
+const typographySchema = new mongoose.Schema(
+  {
+    fontFamily: { type: String, enum: FONT_FAMILIES },
+    fontSize: { type: Number, min: 12, max: 80 },
+    textColor: { type: String, match: /^#[0-9a-f]{6}$/i },
+    bold: Boolean,
+    italic: Boolean,
+  },
+  { _id: false },
+);
+
 const assetSchema = new mongoose.Schema(
   {
     publicId: { type: String, trim: true, maxlength: 500 },
@@ -10,6 +21,7 @@ const assetSchema = new mongoose.Schema(
     format: { type: String, trim: true, maxlength: 20 },
     alt: { type: String, trim: true, maxlength: 300 },
     footerNote: { type: String, trim: true, maxlength: 300 },
+    footerStyle: typographySchema,
   },
   { _id: false },
 );
@@ -51,14 +63,6 @@ const colorPalette = {
   },
 };
 
-const typographySchema = new mongoose.Schema(
-  {
-    fontFamily: { type: String, enum: FONT_FAMILIES },
-    fontSize: { type: Number, min: 12, max: 80 },
-  },
-  { _id: false },
-);
-
 const isYouTubeUrl = (value) =>
   !value || /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)[A-Za-z0-9_-]{6,}(?:[?&][^\s]*)?$/i.test(value);
 
@@ -86,6 +90,7 @@ const invitationDesignSchema = new mongoose.Schema(
     publishedSnapshot: { type: mongoose.Schema.Types.Mixed, select: false },
     content: {
       coverMonogram: { type: String, trim: true, maxlength: 12 },
+      coverDateText: { type: String, trim: true, maxlength: 160 },
       dressGeneralNotes: { type: String, trim: true, maxlength: 1000 },
       rsvpTitle: heading,
       rsvpButtonText: { type: String, trim: true, maxlength: 80 },

@@ -7,6 +7,9 @@ const FONT_FAMILIES = [
 ];
 
 const TYPOGRAPHY_FIELDS = [
+  "coverMonogram", "headline", "coupleNames", "coverDateText", "coverScrollCue",
+  "welcomeKicker", "welcomeHeadline", "videoHeading", "contactMessage", "closingSignature",
+  "seatingHeading", "seatingBody",
   "welcomeMessage", "videoMessage", "closingMessage",
   "venueKicker", "venueHeading",
   "ceremonyHeading", "ceremonyVenue", "ceremonyAddress", "ceremonyTime", "ceremonyMapLabel",

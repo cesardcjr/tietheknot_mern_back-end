@@ -9,12 +9,13 @@ const InvitationDesign = require("../models/InvitationDesign");
 const { protect } = require("../middleware/authMiddleware");
 const { createInvitationToken } = require("../utils/invitationToken");
 const { TYPOGRAPHY_FIELDS } = require("../utils/invitationTypography");
+const cloudinaryConfig = require("../utils/cloudinaryConfig");
 
 const router = express.Router();
 router.use(protect);
 
 const CONTENT_FIELDS = [
-  "coverMonogram", "dressGeneralNotes", "rsvpTitle", "rsvpButtonText",
+  "coverMonogram", "coverDateText", "dressGeneralNotes", "rsvpTitle", "rsvpButtonText",
   "coupleNames",
   "headline",
   "welcomeMessage",
@@ -39,7 +40,7 @@ const CONTENT_FIELDS = [
   "closingMessage",
 ];
 const THEME_FIELDS = ["primary", "accent", "background", "text", "fontPair"];
-const ASSET_FIELDS = ["publicId", "secureUrl", "width", "height", "format", "alt", "footerNote"];
+const ASSET_FIELDS = ["publicId", "secureUrl", "width", "height", "format", "alt", "footerNote", "footerStyle"];
 const ASSET_KEYS = ["coverLogo", "coverImage", "welcomeImage", "menDressImage", "womenDressImage", "ceremonyImage", "receptionImage", "closingImage"];
 const SECTION_KEYS = ["cover", "welcome", "closing"];
 const SECTION_STYLE_FIELDS = ["backgroundColor", "backgroundOpacity", "imageOpacity", "fontFamily", "fontSize"];
@@ -269,13 +270,14 @@ router.put("/design/current", async (req, res) => {
         .slice(0, 8)
         .map((asset) => pick(asset, ASSET_FIELDS))
       : [];
+    const cloudName = cloudinaryConfig()?.cloudName;
     const ownedAsset = (asset) => {
       const prefix = "tietheknot/" + req.user._id + "/invitations/";
       try {
         const url = new URL(asset.secureUrl);
         return asset.publicId?.startsWith(prefix) && url.protocol === "https:" &&
           url.hostname === "res.cloudinary.com" &&
-          decodeURIComponent(url.pathname).startsWith("/" + process.env.CLOUDINARY_CLOUD_NAME + "/image/upload/") &&
+          Boolean(cloudName) && decodeURIComponent(url.pathname).startsWith("/" + cloudName + "/image/upload/") &&
           decodeURIComponent(url.pathname).includes("/" + asset.publicId + ".");
       } catch { return false; }
     };
@@ -299,7 +301,7 @@ router.put("/design/current", async (req, res) => {
     sections.greeting = pick(req.body.sections?.greeting, TEXT_STYLE_FIELDS);
     sections.typography = Object.fromEntries(TYPOGRAPHY_FIELDS
       .filter((key) => req.body.sections?.typography?.[key])
-      .map((key) => [key, pick(req.body.sections.typography[key], ["fontFamily", "fontSize"])]));
+      .map((key) => [key, pick(req.body.sections.typography[key], ["fontFamily", "fontSize", "textColor", "bold", "italic"])]));
     const update = {
       owner: req.user._id,
       eventData: eventData._id,

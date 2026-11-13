@@ -1,16 +1,11 @@
 const crypto = require("crypto");
 const express = require("express");
 const InvitationDesign = require("../models/InvitationDesign");
+const cloudinaryConfig = require("../utils/cloudinaryConfig");
 const { protect } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 router.use(protect);
-
-function cloudinaryConfig() {
-  const { CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET } = process.env;
-  if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) return null;
-  return { cloudName: CLOUDINARY_CLOUD_NAME, apiKey: CLOUDINARY_API_KEY, apiSecret: CLOUDINARY_API_SECRET };
-}
 
 function sign(params, secret) {
   const input = Object.entries(params)
@@ -23,7 +18,10 @@ function sign(params, secret) {
 
 router.post("/signature", (req, res) => {
   const config = cloudinaryConfig();
-  if (!config) return res.status(503).json({ message: "Cloudinary is not configured on the backend serving Invitation Studio." });
+  if (!config) return res.status(503).json({
+    code: "CLOUDINARY_NOT_CONFIGURED",
+    message: "Image uploads are unavailable. Set CLOUDINARY_URL or the three Cloudinary credentials on the API serving Invitation Studio, then redeploy it.",
+  });
   const timestamp = Math.floor(Date.now() / 1000);
   const params = {
     folder: `tietheknot/${req.user._id}/invitations`,

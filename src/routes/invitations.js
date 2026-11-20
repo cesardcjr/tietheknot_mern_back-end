@@ -15,6 +15,7 @@ const router = express.Router();
 router.use(protect);
 
 const CONTENT_FIELDS = [
+  "showSeating", "showRsvp", "seatingMessage", "reservedSeats",
   "coverMonogram", "coverDateText", "dressGeneralNotes", "rsvpTitle", "rsvpButtonText",
   "coupleNames",
   "headline",
